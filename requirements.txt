@@ -1,7 +1,6 @@
-streamlit~=1.56.0
+streamlit
 streamlit-webrtc
-ultralytics~=8.4.43
+ultralytics
 opencv-python-headless
-numpy
-av~=16.1.0
-opencv-python~=4.13.0.92
+av
+twilio
