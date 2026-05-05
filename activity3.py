@@ -1,68 +1,167 @@
 import streamlit as st
-from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
+from streamlit_webrtc import webrtc_streamer
 from ultralytics import YOLO
 import av
 import cv2
-import logging
 import os
+import time
+from datetime import datetime
 
 
-logging.getLogger("aioice").setLevel(logging.ERROR)
+st.set_page_config(
+    page_title="Advanced Object Detection",
+    page_icon="🎥",
+    layout="wide"
+)
+
+st.title("🎥 Live Object Detection and Tracing")
+st.write("Point your camera at objects to identify them in real-time.")
 
 
-st.set_page_config(page_title="Live Object Detection", layout="wide")
-st.title("🎥 Live Object Detection (YOLOv8)")
-st.write("Real-time detection using webcam")
+st.sidebar.header("Settings")
+
+confidence = st.sidebar.slider(
+    "Detection Confidence",
+    0.1, 1.0, 0.40, 0.05
+)
+
+alert_object = st.sidebar.selectbox(
+    "Trigger Alert For",
+    ["person","cell phone","bottle","chair","dog","cat"]
+)
+
+save_frames = st.sidebar.checkbox(
+    "Save Detected Frames",
+    True
+)
+
+
+os.makedirs("detected_frames", exist_ok=True)
+
 
 
 @st.cache_resource
 def load_model():
-    return YOLO("yolov8n.pt")  
+    return YOLO("yolov8n.pt")
 
 model = load_model()
 
-class VideoProcessor(VideoProcessorBase):
-    def recv(self, frame):
-        img = frame.to_ndarray(format="bgr24")
-
-  
-        img = cv2.resize(img, (640, 480))
 
 
-        results = model(img)
-
-
-        annotated_frame = results[0].plot()
-
-        return av.VideoFrame.from_ndarray(annotated_frame, format="bgr24")
+frame_counter = 0
+last_save = time.time()
 
 
 
-rtc_configuration = {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+def video_frame_callback(frame):
 
-try:
-    from twilio.rest import Client
+    global frame_counter
+    global last_save
 
-    account_sid = st.secrets["twilio"]["account_sid"]
-    auth_token = st.secrets["twilio"]["auth_token"]
+    img = frame.to_ndarray(format="bgr24")
 
-    client = Client(account_sid, auth_token)
-    token = client.tokens.create()
 
-    rtc_configuration = {
-        "iceServers": token.ice_servers
-    }
+    results = model.track(
+        img,
+        persist=True,
+        conf=confidence,
+        verbose=False
+    )
 
-    st.success("✅ TURN server connected")
+    result = results[0]
 
-except Exception as e:
-    st.warning("⚠️ TURN server not available (fallback to STUN only)")
-    st.caption(str(e))
+    counts = {}
+    alert_found = False
+
+
+    if result.boxes is not None:
+
+        for box in result.boxes:
+
+            cls_id = int(box.cls[0])
+            label = model.names[cls_id]
+
+            counts[label] = counts.get(label,0)+1
+
+
+            if label == alert_object:
+                alert_found = True
+
+
+        y_pos = 30
+        for obj,count in counts.items():
+
+            text = f"{obj}: {count}"
+
+            cv2.putText(
+                img,
+                text,
+                (20,y_pos),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (0,255,0),
+                2
+            )
+
+            y_pos += 35
+
+
+
+    if alert_found:
+
+        cv2.putText(
+            img,
+            f"ALERT: {alert_object.upper()} DETECTED!",
+            (30,450),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (0,0,255),
+            3
+        )
+
+
+
+    annotated = result.plot()
+
+
+    img = annotated
+
+
+
+    if save_frames:
+
+
+        if len(counts)>0 and time.time()-last_save > 5:
+
+            filename = datetime.now().strftime(
+                "detected_frames/frame_%Y%m%d_%H%M%S.jpg"
+            )
+
+            cv2.imwrite(filename,img)
+            last_save = time.time()
+
+
+    frame_counter += 1
+
+    return av.VideoFrame.from_ndarray(
+        img,
+        format="bgr24"
+    )
+
 
 
 webrtc_streamer(
     key="object-detection",
-    video_processor_factory=VideoProcessor,
-    rtc_configuration=rtc_configuration,
-    media_stream_constraints={"video": True, "audio": False},
+    video_frame_callback=video_frame_callback,
+    async_processing=True,
+    rtc_configuration={
+        "iceServers":[
+            {"urls":["stun:stun.l.google.com:19302"]}
+        ]
+    },
+    media_stream_constraints={
+        "video":True,
+        "audio":False
+    },
 )
+
